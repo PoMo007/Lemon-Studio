@@ -1,0 +1,87 @@
+# Fork-only workflow (BTL): builds the Windows program and the VST3/CLAP plugins on every push to main and publishes
+# them as the rolling prerelease "latest", which the BTL installer downloads (no local compiling).
+# Deliberately a NEW file so it never conflicts when upstream's files change.
+name: BTL Build Windows
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: btl-build-windows
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: btl-release
+
+      # Lemon Studio carries the 32-bit bridge to run 32-bit VST2 plugins (crates/os-vst2/build.rs reads LEMON_BRIDGE32).
+      - name: Build the 32-bit bridge
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --release --locked -p os-vst2-bridge --bin lemonstudio-bridge32 --target i686-pc-windows-msvc
+
+      - name: Build Lemon Studio
+        run: |
+          export LEMON_BRIDGE32="$GITHUB_WORKSPACE/target/i686-pc-windows-msvc/release/lemonstudio-bridge32.exe"
+          cargo build --release --locked -p os-app --bin lemonstudio
+
+      - name: Build the plugins
+        run: cargo run --release --locked -p bundle-plugins
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/lemonstudio.exe dist/lemonstudio.exe
+          Compress-Archive -Path target/bundled/* -DestinationPath dist/LemonStudio-Plugins.zip -Force
+
+      - name: Build info
+        run: |
+          set -euo pipefail
+          exe_sha=$(sha256sum dist/lemonstudio.exe | cut -d' ' -f1)
+          plug_sha=$(sha256sum dist/LemonStudio-Plugins.zip | cut -d' ' -f1)
+          cat > dist/build-info.json <<JSON
+          {
+            "commit": "$GITHUB_SHA",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "exe_sha256": "$exe_sha",
+            "plugins_sha256": "$plug_sha",
+            "run_url": "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          }
+          JSON
+          sed -i 's/^          //' dist/build-info.json
+          cat dist/build-info.json
+
+      - name: Publish rolling release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/lemonstudio.exe dist/LemonStudio-Plugins.zip dist/build-info.json \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Latest build" \
+            --notes "Automatic Windows build of commit $GITHUB_SHA. Downloaded by the BTL installer; do not rely on this tag staying on one commit."

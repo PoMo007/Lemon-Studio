@@ -1,0 +1,43 @@
+# Fork-only workflow (BTL): every day merges ItsAlphaNeon/Lemon-Studio main into this fork's main, then starts a build.
+# If the merge conflicts it stops and fails loudly (never half-merges); fix by hand or ask an AI assistant.
+# Note: if upstream changed files under .github/workflows, GitHub refuses a workflow-token push of them; then use the
+# "Sync fork" button on the fork's page once, and this job continues to work afterwards.
+name: BTL Sync upstream
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/ItsAlphaNeon/Lemon-Studio.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already contains everything from upstream."
+            exit 0
+          fi
+          git config user.name "btl-sync"
+          git config user.email "btl-sync@users.noreply.github.com"
+          if ! git merge upstream/main -m "Merge upstream main"; then
+            git merge --abort || true
+            echo "::error::Merge conflict with upstream. Nothing was changed. Resolve by hand or with an AI assistant."
+            exit 1
+          fi
+          git push origin HEAD:main
+          gh workflow run build-windows.yml
